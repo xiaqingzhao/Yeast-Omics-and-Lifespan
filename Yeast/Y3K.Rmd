@@ -1,0 +1,809 @@
+---
+title: "Yeast Multiomics and Lifespan"
+author: "Xiaqing Zhao"
+date: "9/30/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages, include=FALSE}
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+library(ggExtra)
+library(caret)
+library(DMwR)
+```
+
+## 1. Overview of Phenotypic Data
+
+```{r ImportPhenoData, include=FALSE}
+Pheno<-fread("Phenotype.txt")
+
+## Rename the columns so that they are easier to refer to 
+colnames(Pheno)<-c("SGD_ID","Gene_ID","FermDensityFC","RespDensityFC","FermP","RespP","YPG_Phenotype","CLS","CLS%Change","MeanRLS","MaxRLS")
+Pheno<-Pheno[-169,c(1,2,4,3,8,10,11)] ## Delete the last row of the phenotype file, which is for wt
+
+## Reorder the rows according to ordering of the omics dataset
+Strain<-read.table("Strain.txt")
+Strain<-as.character(Strain$V1)
+Pheno<-Pheno %>% slice(match(Strain,Gene_ID))
+Pheno<-data.table(Pheno)
+```
+
+
+### Distributions of density fold change and lifespan
+
+```{r include=FALSE}
+dev.off()
+### Shapiro-Wilk test of normality
+apply(Pheno[,-c(1,2)],2,shapiro.test)
+```
+
+
+Most of the phenotypes except for mean replicative lifespan deviate from normal. 
+
+Note that there are 17 strains that do not have respiration or fermentation density, **AND** mean and maximal replicative lifespan. 
+
+
+```{r PhenoDist, echo=FALSE}
+par(mfrow=c(2,2))
+
+plot(density(Pheno$RespDensityFC,na.rm=TRUE),main="Respiration Density Fold Change") ##Bimodal  
+qqnorm(Pheno$RespDensityFC,pch=20)
+qqline(Pheno$RespDensityFC,col="red")
+
+plot(density(Pheno$FermDensityFC,na.rm=TRUE),main="Fermentation Density Fold Change")
+qqnorm(Pheno$FermDensityFC,pch=20)
+qqline(Pheno$FermDensityFC,col="red")
+
+plot(density(Pheno$CLS),main="Chronological Lifespan")
+qqnorm(Pheno$CLS,pch=20)
+qqline(Pheno$CLS,col="red")
+
+plot(density(Pheno$MeanRLS,na.rm=TRUE),main="Mean Replicative Lifespan")
+qqnorm(Pheno$MeanRLS,pch=20)
+qqline(Pheno$MeanRLS,col="red")
+
+plot(density(Pheno$MaxRLS,na.rm=TRUE),main="Maximal Replicative Lifespan")
+qqnorm(Pheno$MaxRLS,pch=20)
+qqline(Pheno$MaxRLS,col="red")
+
+```
+
+
+### Pairwise correlation between different genotypes
+
+```{r echo=FALSE}
+pairs(Pheno[,3:7],pch=20)
+```
+
+#### Pairs that might be correlated 
+##### Respiration Density FC vs Fermentation Density FC 
+
+```{r include=FALSE}
+cor.test(Pheno$FermDensityFC,Pheno$RespDensityFC,method="spearman")
+```
+
+```{r echo=FALSE,warning=FALSE}
+p<-ggplot(Pheno,aes(x=FermDensityFC,y=RespDensityFC))+geom_point()+theme_bw()+
+  geom_smooth(method='lm')
+ggMarginal(p, type ="histogram")
+```
+
+Spearman's rank correlation rho=0.786827, p-value < 2.2e-16
+
+##### CLS vs Mean RLS
+```{r include=FALSE}
+cor.test(Pheno$CLS,Pheno$MeanRLS,method="spearman")
+```
+
+```{r echo=FALSE,warning=FALSE}
+q<-ggplot(Pheno,aes(x=CLS,y=MeanRLS))+geom_point()+theme_bw()
+ggMarginal(q, type ="histogram")
+```
+
+Spearman's rank correlation rho=0.121463, p-value = 0.1374. No significant correlation between CLS and Mean RLS. 
+
+##### Mean RLS vs Max RLS
+```{r include=FALSE}
+cor.test(Pheno$MeanRLS,Pheno$MaxRLS,method="spearman")
+```
+
+```{r echo=FALSE,warning=FALSE}
+r<-ggplot(Pheno,aes(x=MeanRLS,y=MaxRLS))+geom_point()+theme_bw()+
+  geom_smooth(method='lm')
+ggMarginal(r, type ="histogram")
+```
+
+Spearman's rank correlation rho=0.6762903, p-value < 2.2e-16. 
+
+##### Respiration Density vs. CLS
+
+```{r include=FALSE}
+cor.test(Pheno$RespDensityFC,Pheno$CLS,method="spearman")
+```
+
+```{r echo=FALSE,warning=FALSE}
+s<-ggplot(Pheno,aes(x=RespDensityFC,y=CLS))+geom_point()+theme_bw()+
+  geom_smooth(method='lm')
+ggMarginal(s, type ="histogram")
+```
+
+Spearman's rank correlation rho=0.2764692, p-value = 0.0005897. Significant but low level of correlation. 
+
+Note that strains that have very low respiration density can have a huge range of CLS. 
+
+##### Fermentation Density vs. MeanRLS
+
+```{r include=FALSE}
+cor.test(Pheno$FermDensityFC,Pheno$MeanRLS,method="spearman")
+```
+
+```{r echo=FALSE,warning=FALSE}
+t<-ggplot(Pheno,aes(x=FermDensityFC,y=MeanRLS))+geom_point()+theme_bw()+
+  geom_smooth(method='lm')
+ggMarginal(t, type ="histogram")
+```
+
+Spearman's rank correlation rho=0.2556684, p-value = 0.001533. Significant but low level of correlation. 
+
+## 2. Overview of Omics Data
+
+```{r importResp, include=FALSE}
+Resp<-fread("RespOmics.txt")
+Resp<-select(Resp,-c(ATP3,COQ8,SCH9,TIM8,'YAL044W-A','YBR230W-A')) # Delete lines that do not have lifespan data
+colnames(Resp)[1]<-'Molecule'
+colnames(Resp)[2]<-'Type'
+
+RespProt<-Resp[Type=="Protein"][,-2]
+RespMet<-Resp[Type=="Metabolite"][,-2]
+RespLip<-Resp[Type=="Lipid"][,-2]
+```
+
+```{r importFerm, include=FALSE}
+Ferm<-fread("FermOmics.txt")
+Ferm<-select(Ferm,-c(ATP3,COQ8,SCH9,TIM8,'YAL044W-A','YBR230W-A')) # Delete lines that do not have lifespan data
+colnames(Ferm)[1]<-'Molecule'
+colnames(Ferm)[2]<-'Type'
+
+FermProt<-Ferm[Type=="Protein"][,-2]
+FermMet<-Ferm[Type=="Metabolite"][,-2]
+FermLip<-Ferm[Type=="Lipid"][,-2]
+```
+
+### Normalization
+
+Given that all data points are log2(fold change), I would refrain from doing any normalization that we would do on raw data. 
+
+
+```{r Transpose,echo=FALSE}
+RespProt<-dcast(melt(RespProt, id.vars="Molecule"), variable~Molecule)
+RespMet<-dcast(melt(RespMet, id.vars="Molecule"), variable~Molecule)
+RespLip<-dcast(melt(RespLip, id.vars="Molecule"), variable~Molecule)
+
+FermProt<-dcast(melt(FermProt, id.vars="Molecule"), variable~Molecule)
+FermMet<-dcast(melt(FermMet, id.vars="Molecule"), variable~Molecule)
+FermLip<-dcast(melt(FermLip, id.vars="Molecule"), variable~Molecule)
+```
+
+
+### Missingness
+
+There are non negligible amount of missing values in this dataset. We would like to get an idea of the mechanism of missingness to come up with an appropriate method to deal with the missing values. Specifically, we would like to know whether missing values occur randomly, or not at random, i.e. when the abundance of a chemical species is close enough to the limit of detection we would expect to see higher rate of missing values. 
+
+In order to identify the missing value mechanisms in the data, we plot the number of missingness among the 168 strains that have phenotypic data versus the average log2(fold change) value. Each dot represents a molecule. The red line shows 10% missingness. The figures show that number of missingness is not correlated with intensity of signal, suggesting missing at random. Removing molecules with too many missing values and performing KNN imputation would be a reasonable way to deal with missing values. 
+
+```{r echo=FALSE}
+par(mfrow=c(1,3))
+plot(y=sapply(RespProt[,-1],function(x) sum(is.na(x))),x=sapply(RespProt[,-1],mean,na.rm=TRUE),pch=20,
+     xlab="average fold change",ylab="number of missingness",main="Respiration Proteins")
+abline(h=17,col="red")
+plot(y=sapply(RespMet[,-1],function(x) sum(is.na(x))),x=sapply(RespMet[,-1],mean,na.rm=TRUE),pch=20,
+     xlab="average fold change",ylab="number of missingness",main="Respiration Metabolites")
+abline(h=17,col="red")
+plot(y=sapply(RespLip[,-1],function(x) sum(is.na(x))),x=sapply(RespLip[,-1],mean,na.rm=TRUE),pch=20,
+     xlab="average fold change",ylab="number of missingness",main="Respiration Lipids")
+abline(h=17,col="red")
+
+plot(y=sapply(FermProt[,-1],function(x) sum(is.na(x))),x=sapply(FermProt[,-1],mean,na.rm=TRUE),pch=20,
+     xlab="average fold change",ylab="number of missingness",main="Fermentation Proteins")
+abline(h=17,col="red")
+plot(y=sapply(FermMet[,-1],function(x) sum(is.na(x))),x=sapply(FermMet[,-1],mean,na.rm=TRUE),pch=20,
+     xlab="average fold change",ylab="number of missingness",main="Fermentation Metabolites")
+abline(h=17,col="red")
+plot(y=sapply(FermLip[,-1],function(x) sum(is.na(x))),x=sapply(FermLip[,-1],mean,na.rm=TRUE),pch=20,
+     xlab="average fold change",ylab="number of missingness",main="Fermentation Lipids")
+abline(h=17,col="red")
+
+invisible(dev.off())
+```
+
+
+
+```{r CompleteData,echo=FALSE}
+CompResp<-Resp[complete.cases(Resp)]
+CompFerm<-Ferm[complete.cases(Ferm)]
+
+CompRespMolecule<-CompResp[,Molecule]
+CompRespType<-CompResp[,Type]
+CompFermMolecule<-CompFerm[,Molecule]
+CompFermType<-CompFerm[,Type]
+
+CompResp<-CompResp[,-c(1,2)]
+CompFerm<-CompFerm[,-c(1,2)]
+
+CompResp<-t(CompResp)
+CompFerm<-t(CompFerm)
+
+colnames(CompResp)<-CompRespMolecule
+colnames(CompFerm)<-CompFermMolecule
+
+CompRespProt<-CompResp[,CompRespType=="Protein"]
+CompRespMet<-CompResp[,CompRespType=="Metabolite"]
+CompRespLip<-CompResp[,CompRespType=="Lipid"]
+
+CompFermProt<-CompFerm[,CompFermType=="Protein"]
+CompFermMet<-CompFerm[,CompFermType=="Metabolite"]
+CompFermLip<-CompFerm[,CompFermType=="Lipid"]
+
+```
+
+```{r DeMissing_KNN,echo=FALSE}
+Resp<-Resp[rowSums(is.na(Resp))<17,]
+Ferm<-Ferm[rowSums(is.na(Ferm))<17,]
+
+RespMolecule<-Resp[,Molecule]
+RespType<-Resp[,Type]
+FermMolecule<-Ferm[,Molecule]
+FermType<-Ferm[,Type]
+
+Strain<-colnames(Resp)[-c(1:2)]
+
+Resp<-Resp[,-c(1,2)]
+Ferm<-Ferm[,-c(1,2)]
+
+Resp<-t(Resp)
+Ferm<-t(Ferm)
+
+colnames(Resp)<-RespMolecule
+colnames(Ferm)<-FermMolecule
+
+RespProt<-Resp[,RespType=="Protein"]
+RespMet<-Resp[,RespType=="Metabolite"]
+RespLip<-Resp[,RespType=="Lipid"]
+
+FermProt<-Ferm[,FermType=="Protein"]
+FermMet<-Ferm[,FermType=="Metabolite"]
+FermLip<-Ferm[,FermType=="Lipid"]
+
+knnRespProt<-knnImputation(RespProt,scale=F)
+knnRespMet<-knnImputation(RespMet,scale=F)
+knnRespLip<-knnImputation(RespLip,scale=F)
+
+knnFermProt<-knnImputation(FermProt,scale=F)
+knnFermMet<-knnImputation(FermMet,scale=F)
+knnFermLip<-knnImputation(FermLip,scale=F)
+```
+
+
+### Imputation
+
+I kept molecules with no more than 16 missing values among the 168 strains that have phenotypic data (<10% missingness), and performed KNN imputation to fill in missing values. Allowing more missingness would not add too many molecules and will result in insufficient complete cases for computing neighbors in KNN. 
+
+To make sure that imputation does not drastically alter the data, I performed PCA with molecules with no missing data and PCA with imputated data. The left panel shows PC1 vs PC2 with complete data, and the right panel shows PC1 vs PC2 with imputed data. Note that the sign of any PC is arbitrary. 
+
+```{r PCAPlot,echo=FALSE}
+PCAPlot<-function(DataMatrix) {
+  PCA<-prcomp(DataMatrix,scale.=TRUE)
+  DF<-data.frame(Strain=rownames(PCA$x),PCA$x[,1:3])
+  percentage<-round(PCA$sdev^2/sum(PCA$sdev^2)*100, 2)
+  percentage<-paste(colnames(PCA$x), "(", as.character(percentage), "%)",sep="" )
+  ggplot(data=DF, aes(x=PC1, y=PC2))+geom_text(aes(label=Strain),size=2)+
+    xlab(percentage[1])+ylab(percentage[2])+theme_bw()
+}
+```
+
+```{r echo=FALSE}
+a<-PCAPlot(CompRespProt)
+b<-PCAPlot(knnRespProt)
+grid.arrange(a,b,ncol=2,top="Respiration Protein")
+
+a<-PCAPlot(CompRespMet)
+b<-PCAPlot(knnRespMet)
+grid.arrange(a,b,ncol=2,top="Respiration Metabolite")
+
+a<-PCAPlot(CompRespLip)
+b<-PCAPlot(knnRespLip)
+grid.arrange(a,b,ncol=2,top="Respiration Lipid")
+
+a<-PCAPlot(CompFermProt)
+b<-PCAPlot(knnFermProt)
+grid.arrange(a,b,ncol=2,top="Fermentation Protein")
+
+a<-PCAPlot(CompFermMet)
+b<-PCAPlot(knnFermMet)
+grid.arrange(a,b,ncol=2,top="Fermentation Metabolite")
+
+a<-PCAPlot(CompFermLip)
+b<-PCAPlot(knnFermLip)
+grid.arrange(a,b,ncol=2,top="Fermentation Lipid")
+
+```
+
+It seems that imputation does not change the data drastically. Subsequent analyses that require no missing values are done on imputated data. 
+
+
+## 3. Exploratory Analysis Combining Phenotypes and Omics
+
+The following PCA plots are based on imputated data. Dots are colored by phenotypic measures. Grey dots are lines with missing phenotypic data. 
+
+```{r PCA_Pheno,echo=FALSE}
+PCA_Pheno<-function(DataMatrix,Phenotype) {
+  PCA<-prcomp(DataMatrix,scale.=TRUE)
+  DF<-data.frame(Strain=rownames(PCA$x),PCA$x[,1:3],Phenotype=Phenotype)
+  percentage<-round(PCA$sdev^2/sum(PCA$sdev^2)*100, 2)
+  percentage<-paste(colnames(PCA$x), "(", as.character(percentage), "%)",sep="" )
+  
+  r<-ggplot(data=DF, aes(x=PC1,y=PC2,col=Phenotype))+geom_point()+
+    scale_color_gradient2(midpoint=median(DF$Phenotype,na.rm=TRUE),low="blue",mid="white",high="red",space="Lab")+
+    xlab(percentage[1])+ylab(percentage[2])+theme_bw()
+  s<-ggplot(data=DF, aes(x=PC1,y=PC3,col=Phenotype))+geom_point()+
+    scale_color_gradient2(midpoint=median(DF$Phenotype,na.rm=TRUE),low="blue",mid="white",high="red",space="Lab")+
+    xlab(percentage[1])+ylab(percentage[3])+theme_bw()
+  t<-ggplot(data=DF, aes(x=PC2,y=PC3,col=Phenotype))+geom_point()+
+    scale_color_gradient2(midpoint=median(DF$Phenotype,na.rm=TRUE),low="blue",mid="white",high="red",space="Lab")+
+    xlab(percentage[2])+ylab(percentage[3])+theme_bw()
+  grid.arrange(r,s,t,ncol=2)
+}
+```
+
+#### Respiration Protein colored by Chronological Lifespan
+```{r echo=FALSE}
+PCA_Pheno(knnRespProt,Pheno$CLS)
+```
+
+#### Respiration Metabolite colored by Chronological Lifespan
+```{r echo=FALSE}
+PCA_Pheno(knnRespMet,Pheno$CLS)
+```
+
+#### Respiration Lipid colored by Chronological Lifespan
+```{r echo=FALSE}
+PCA_Pheno(knnRespLip,Pheno$CLS)
+```
+
+There may be some weak correlation between chronological lifespan and PC1 of respiration omics. 
+
+
+#### Fermentation Protein colored by Mean Replicative Lifespan
+```{r echo=FALSE}
+PCA_Pheno(knnFermProt,Pheno$MeanRLS)
+```
+
+#### Fermentation Metabolite colored by Mean Replicative Lifespan
+```{r echo=FALSE}
+PCA_Pheno(knnFermMet,Pheno$MeanRLS)
+```
+
+#### Fermentation Lipid colored by Mean Replicative Lifespan
+```{r echo=FALSE}
+PCA_Pheno(knnFermLip,Pheno$MeanRLS)
+```
+
+It is difficult to see much correlation between mean replicative lifespan and the first three PCs of fermentation omics. This does not mean that there are not molecules that are correlated with replicatie lifespan. 
+
+#### Respiration Protein colored by Respiration Density Fold Change
+```{r echo=FALSE}
+PCA_Pheno(knnRespProt,Pheno$RespDensityFC)
+```
+
+#### Respiration Metabolite colored by Respiration Density Fold Change
+```{r echo=FALSE}
+PCA_Pheno(knnRespMet,Pheno$RespDensityFC)
+```
+
+#### Respiration Lipid colored by Respiration Density Fold Change
+```{r echo=FALSE}
+PCA_Pheno(knnRespLip,Pheno$RespDensityFC)
+```
+
+PC1 is highly correlated with respiration density. 
+
+#### Fermentation Protein colored by Fermentation Density Fold Change
+```{r echo=FALSE}
+PCA_Pheno(knnFermProt,Pheno$FermDensityFC)
+```
+
+#### Fermentation Metabolite colored by Fermentation Density Fold Change
+```{r echo=FALSE}
+PCA_Pheno(knnFermMet,Pheno$FermDensityFC)
+```
+
+#### Fermentation Lipid colored by Fermentation Density Fold Change
+```{r echo=FALSE}
+PCA_Pheno(knnFermLip,Pheno$FermDensityFC)
+```
+
+The first three PCs are somewhat correlated with fermentation density. 
+
+
+## 4. Univariate Analysis
+
+We are interested in identifying molecules whose levels are correlated with phenotypes. 
+
+Considering that the distributions of most phenotypes, as well as most molecules are not normal, we use Spearman's ranke-order correlation, which is a nonparametric version the Pearson product-moment correlation. Spearman's correlation coefficient rho measures the strength and direction of association between the two variables. 
+
+I performed Spearman's correlation between respiration omics and chronological lifespan, respiration omics and respiration density fold change, fermentation omics and replicative lifespan and fermentation omics and fermentation density fold change. Complete results are stored in "SpearmanCor.RData". Lists of molecules that are significantly correlated with phenotypes are stored in "SpearmanCor_ForEnrichment.xlsx". You are welcome to filter the data with different stringency by altering FDR or Bonferroni levels. 
+
+For proteins, it would make sense to perform GO enrichment analysis with the significant molecules on the *Saccharomyces* Genome Database www.yeastgenome.org ("Analyze"-"GO Term Finder""). Note that it is necessary to specify background set of genes. In this case the background set is the list of proteins that went through Spearman correlation test, which is a subset of all identified proteins. For metabolites, since there are large number of unidentified molecules with unknown m/z, it is difficult to perform enrichment analysis. For lipids, since we have limited *a priori* knowledge on lipid function we cannot perform enrichment analysis. Another thing to note is that there are many molecules that are correlated with density fold change, and it would not make sense to perform GO enrichment if most of the tested molecules are significant. 
+
+
+## 5. Multivariate Analysis
+
+The goal is to use supervised learning methods to predict phenotypes with omics data, and to identify molecules that are critical in prediciting phenotypes. I selected three commonly used regression models: partial least square, random forest and elastic net. 
+
+Partial least squares (PLS) is most commonly used in the field of chemometrics. The PLS approach attempts to find rotations of features that explain both the response and the predictors, and it accomondates correlated predictors. The number of partial least squares directions (ncomp) used in PLS is a tuning parameter that is chosen by 5 fold cross-validation. 
+
+Random forests is a non-linear ensemble learning method. Random forests for regression operates by constructing a multitude of decision trees with subsets of predictors and outputting the mean prediction of the individuals trees. It accomondates data with correlated predictors, and can be used to rank the importance of predictors. The most important tuning parameter is the number of variables to possibly split at in each node (mtry) and is chosen by 5 fold cross-validation. 
+
+Elastic net is a regularized regression method that linearly combines the lasso and ridge regression methods. The first of the two important tuning parameters is alpha, where when alpha=1 the model uses lasso penalty, when alpha=0 the ridge penalty, and when alpha in between of 0 and 1 the model is somewhere in between of lasso and ridge. Another important tuning parameter is lambda, which is the size of penalty. alpha and lambda are chosen by 5 fold cross-validation. 
+
+For each one of these models, I saved the model information, as well as variable importance in RData files ("PLS.RData","RF.RData","EN.RData"). For models that we think does a good job predicting lifespan, we could take the first n most important variables and perform enrichment analysis, where n is an arbitrary positive integer. 
+
+```{r loaddata,echo=FALSE}
+Pheno<-fread("Phenotype_Reordered.txt")
+load("KNN_Omics.RData")
+
+Pheno151<-Pheno[complete.cases(Pheno)]
+FermProt151<-knnFermProt[complete.cases(Pheno),]
+FermMet151<-knnFermMet[complete.cases(Pheno),]
+FermLip151<-knnFermLip[complete.cases(Pheno),]
+```
+
+### Partial least squares models
+
+```{r echo=FALSE}
+load("PLS.RData")
+
+par(mfrow=c(1,3))
+
+pred<-predict(RespProt_CLS.pls.final,newdata=knnRespProt)
+real<-Pheno$CLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="CLS predicted by RespProt",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+
+pred<-predict(RespMet_CLS.pls.final,newdata=knnRespMet)
+real<-Pheno$CLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="CLS predicted by RespMet",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+
+pred<-predict(RespLip_CLS.pls.final,newdata=knnRespLip)
+real<-Pheno$CLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="CLS predicted by RespLip",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+```
+
+The RespProt model has root of mean squared error (RMSE) of 9.93, and R squared of 0.25. The RespMet model has RMSE of 9.83 and R squared of 0.28. The RespLip model has RMSE of 10.35 and R squared of 0.22. From the plots we see that the PLS model does not do a great job predicting chronological lifespan with respiration omics. The relative high R squared is mostly driven by the two clouds of high and low lifespans.  
+
+```{r echo=FALSE}
+par(mfrow=c(1,3))
+
+pred<-predict(FermProt_RLS.pls.final,newdata=FermProt151)
+real<-Pheno151$MeanRLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="RLS predicted by FermProt",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+
+pred<-predict(FermMet_RLS.pls.final,newdata=FermMet151)
+real<-Pheno151$MeanRLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="RLS predicted by FermProt",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+
+pred<-predict(FermLip_RLS.pls.final,newdata=FermLip151)
+real<-Pheno151$MeanRLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="RLS predicted by FermProt",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+```
+
+The FermProt model has RMSE of 4.94, and R squared of 0.23. The FermMet model has RMSE of 5.37 and R squared of 0.14. The FermLip model has RMSE of 5.52 and R squared of 0.08. From the plots we see that the PLS model does not do a great job predicting replicative lifespan with fermentation omics. 
+
+### Random forest models 
+
+```{r echo=FALSE}
+load("RF.RData")
+
+par(mfrow=c(1,3))
+
+pred<-predict(RespProt_CLS.rf.final,newdata=knnRespProt)
+real<-Pheno$CLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="CLS predicted by RespProt",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+
+pred<-predict(RespMet_CLS.rf.final,newdata=knnRespMet)
+real<-Pheno$CLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="CLS predicted by RespMet",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+
+pred<-predict(RespLip_CLS.rf.final,newdata=knnRespLip)
+real<-Pheno$CLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="CLS predicted by RespLip",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+```
+
+The RespProt model has RMSE of 10.20, and R squared of 0.23. The RespMet model has RMSE of 10.07 and R squared of 0.25. The RespLip model has RMSE of 10.53 and R squared of 0.17. From the plots we see that the random forest models do a satisfactory job predicting chronological lifespan with respiration omics. It is worth looking into variables with high importance in these models. 
+
+```{r echo=FALSE}
+par(mfrow=c(1,3))
+
+pred<-predict(FermProt_RLS.rf.final,newdata=FermProt151)
+real<-Pheno151$MeanRLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="RLS predicted by FermProt",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+
+pred<-predict(FermMet_RLS.rf.final,newdata=FermMet151)
+real<-Pheno151$MeanRLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="RLS predicted by FermProt",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+
+pred<-predict(FermLip_RLS.rf.final,newdata=FermLip151)
+real<-Pheno151$MeanRLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="RLS predicted by FermProt",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+```
+
+The FermProt model has RMSE of 5.07, and R squared of 0.19. The FermMet model has RMSE of 5.43 and R squared of 0.07. The FermLip model has RMSE of 5.41 and R squared of 0.09. From the plots we see that the random forest models do an OK job predicting replicative lifespan with fermentation omics. However we need to be cautious with the models since the R squared values are pretty low. 
+
+### Elastic net models
+
+```{r echo=FALSE}
+load("EN.RData")
+
+par(mfrow=c(1,3))
+
+pred<-predict(RespProt_CLS.en.final,newdata=knnRespProt)
+real<-Pheno$CLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="CLS predicted by RespProt",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+
+pred<-predict(RespMet_CLS.en.final,newdata=knnRespMet)
+real<-Pheno$CLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="CLS predicted by RespMet",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+
+pred<-predict(RespLip_CLS.en.final,newdata=knnRespLip)
+real<-Pheno$CLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="CLS predicted by RespLip",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+```
+
+The RespProt model has RMSE of 10.18, and R squared of 0.25. The RespMet model has RMSE of 10.14 and R squared of 0.23. The RespLip model has RMSE of 10.36 and R squared of 0.19. From the plots we see that the elastic net models do not do a great job predicting chronological lifespan with respiration omics. 
+
+```{r echo=FALSE}
+par(mfrow=c(1,3))
+
+pred<-predict(FermProt_RLS.en.final,newdata=FermProt151)
+real<-Pheno151$MeanRLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="RLS predicted by FermProt",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+
+pred<-predict(FermMet_RLS.en.final,newdata=FermMet151)
+real<-Pheno151$MeanRLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="RLS predicted by FermProt",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+
+pred<-predict(FermLip_RLS.en.final,newdata=FermLip151)
+real<-Pheno151$MeanRLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="RLS predicted by FermProt",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+```
+
+The FermProt model has RMSE of 4.80, and R squared of 0.26. The FermMet model has RMSE of 5.29 and R squared of 0.12. The FermLip model has RMSE of 5.61 and R squared of 0.11. From the plots we see that the elastic net models for protein and metabolite do an OK job predicting replicative lifespan with fermentation omics. Lipid is not useful in predicting replicative lifespan. 
+
+Random forest in general does better job predicting lifespan with omics. The caveat is that the mechanism behind random forest is not immediately clear. We can still make sense of the models by examining variables with high importance though. 
+
+The two linear models, PLS and elastic net models do not do a very good job predicting lifespan, especially chronological lifespan. I think it may have to do with the fact that the distribution of chronological lifespan is not normal (almost bi-model). 
+
+We know that density is highly correlated with omics, in order to control for the effects of density, I ran all models again with density fold change as a covariate. 
+
+```{r echo=FALSE}
+Pheno<-fread("Phenotype_Reordered.txt")
+load("KNN_Omics.RData")
+
+RespProt<-cbind(RespDen=Pheno$RespDensityFC,knnRespProt)
+RespMet<-cbind(RespDen=Pheno$RespDensityFC,knnRespMet)
+RespLip<-cbind(RespDen=Pheno$RespDensityFC,knnRespLip)
+
+FermProt<-cbind(FermDen=Pheno$FermDensityFC,knnFermProt)
+FermMet<-cbind(FermDen=Pheno$FermDensityFC,knnFermMet)
+FermLip<-cbind(FermDen=Pheno$FermDensityFC,knnFermLip)
+
+Pheno151<-Pheno[complete.cases(Pheno)]
+
+RespProt<-RespProt[complete.cases(Pheno),]
+RespMet<-RespMet[complete.cases(Pheno),]
+RespLip<-RespLip[complete.cases(Pheno),]
+
+FermProt<-FermProt[complete.cases(Pheno),]
+FermMet<-FermMet[complete.cases(Pheno),]
+FermLip<-FermLip[complete.cases(Pheno),]
+```
+
+### Partial least square models with density
+
+```{r echo=FALSE}
+load("PLS_DensityControlled.RData")
+
+par(mfrow=c(1,3))
+
+pred<-predict(RespProt_CLS.dc.pls.final,newdata=RespProt)
+real<-Pheno151$CLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="CLS predicted by RespProt",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+
+pred<-predict(RespMet_CLS.dc.pls.final,newdata=RespMet)
+real<-Pheno151$CLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="CLS predicted by RespMet",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+
+pred<-predict(RespLip_CLS.dc.pls.final,newdata=RespLip)
+real<-Pheno151$CLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="CLS predicted by RespLip",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+```
+
+The RespProt model has RMSE of 10.62, and R squared of 0.28. The RespMet model has RMSE of 10.14 and R squared of 0.29. The RespLip model has RMSE of 10.53 and R squared of 0.19. From the plots we see that there is slight improvement in prediction after adding density as a covariate. 
+
+```{r echo=FALSE}
+par(mfrow=c(1,3))
+
+pred<-predict(FermProt_RLS.dc.pls.final,newdata=FermProt)
+real<-Pheno151$MeanRLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="RLS predicted by FermProt",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+
+pred<-predict(FermMet_RLS.dc.pls.final,newdata=FermMet)
+real<-Pheno151$MeanRLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="RLS predicted by FermProt",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+
+pred<-predict(FermLip_RLS.dc.pls.final,newdata=FermLip)
+real<-Pheno151$MeanRLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="RLS predicted by FermProt",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+```
+
+The FermProt model has RMSE of 4.94, and R squared of 0.23. The FermMet model has RMSE of 5.36 and R squared of 0.14. The FermLip model has RMSE of 5.51 and R squared of 0.09. 
+
+### Random forest models with density 
+
+```{r echo=FALSE}
+load("RF_DensityControlled.RData")
+
+par(mfrow=c(1,3))
+
+pred<-predict(RespProt_CLS.dc.rf.final,newdata=RespProt)
+real<-Pheno151$CLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="CLS predicted by RespProt",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+
+pred<-predict(RespMet_CLS.dc.rf.final,newdata=RespMet)
+real<-Pheno151$CLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="CLS predicted by RespMet",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+
+pred<-predict(RespLip_CLS.dc.rf.final,newdata=RespLip)
+real<-Pheno151$CLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="CLS predicted by RespLip",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+```
+
+The RespProt model has RMSE of 10.26, and R squared of 0.27. The RespMet model has RMSE of 10.24 and R squared of 0.29. The RespLip model has RMSE of 10.63 and R squared of 0.21. 
+
+```{r echo=FALSE}
+par(mfrow=c(1,3))
+
+pred<-predict(FermProt_RLS.dc.rf.final,newdata=FermProt)
+real<-Pheno151$MeanRLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="RLS predicted by FermProt",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+
+pred<-predict(FermMet_RLS.dc.rf.final,newdata=FermMet)
+real<-Pheno151$MeanRLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="RLS predicted by FermProt",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+
+pred<-predict(FermLip_RLS.dc.rf.final,newdata=FermLip)
+real<-Pheno151$MeanRLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="RLS predicted by FermProt",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+```
+
+The FermProt model has RMSE of 5.07, and R squared of 0.19. The FermMet model has RMSE of 5.48 and R squared of 0.06. The FermLip model has RMSE of 5.42 and R squared of 0.11.
+
+### Elastic net models with density 
+
+```{r echo=FALSE}
+load("EN_DensityControlled.RData")
+
+par(mfrow=c(1,3))
+
+pred<-predict(RespProt_CLS.dc.en.final,newdata=RespProt)
+real<-Pheno151$CLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="CLS predicted by RespProt",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+
+pred<-predict(RespMet_CLS.dc.en.final,newdata=RespMet)
+real<-Pheno151$CLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="CLS predicted by RespMet",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+
+pred<-predict(RespLip_CLS.dc.en.final,newdata=RespLip)
+real<-Pheno151$CLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="CLS predicted by RespLip",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+```
+
+The RespProt model has RMSE of 10.14, and R squared of 0.25. The RespMet model has RMSE of 10.42 and R squared of 0.22. The RespLip model has RMSE of 10.61 and R squared of 0.20. 
+
+```{r echo=FALSE}
+par(mfrow=c(1,3))
+
+pred<-predict(FermProt_RLS.dc.en.final,newdata=FermProt)
+real<-Pheno151$MeanRLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="RLS predicted by FermProt",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+
+pred<-predict(FermMet_RLS.dc.en.final,newdata=FermMet)
+real<-Pheno151$MeanRLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="RLS predicted by FermProt",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+
+pred<-predict(FermLip_RLS.dc.en.final,newdata=FermLip)
+real<-Pheno151$MeanRLS
+plot(x=real,y=pred,pch=20,xlab="Real Phenotype Data",ylab="Predicted Value",
+     main="RLS predicted by FermProt",ylim=c(min(real),max(real)))
+abline(0,1,col="red")
+```
+
+The FermProt model has RMSE of 5.02, and R squared of 0.21. The FermMet model has RMSE of 5.23 and R squared of 0.15. The FermLip model has RMSE of 5.61 and R squared of 0.08.
+
+

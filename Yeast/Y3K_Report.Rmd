@@ -1,0 +1,102 @@
+---
+title: "Yeast Multiomics and Lifespan Analysis Report"
+author: "Xiaqing Zhao"
+date: "1/13/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages, include=FALSE}
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+library(ggExtra)
+library(caret)
+library(DMwR)
+```
+
+
+## 1. Univariate Analysis
+
+The purpose of this section is to identify molecules whose abundances are correlated with lifespan. We correlate molecule abundances of the respiration condition with chronological lifespan, and those of the fermentation condition with mean replicative lifespan. We are treating molecules individually. 
+
+Code in this section can be found in the file "UnivariateAnalysis.R". 
+
+Visualization of the relationship between lifespan and molecule abundances can be found in "RespProt_CLS.pdf","RespMet_CLS.pdf","RespLip_CLS.pdf","FermProt_RLS.pdf","FermMet_RLS.pd","FermLip_RLS.pd". 
+
+### 1.1 Spearman's Correlation 
+
+Test of correlation is the most naive method to establish correlation relationship betweeen two variables. 
+
+Shapiro-Wilk's test of normality ("UnivariateAnalysis.R" line 14-29) has shown that the majority of molecules do not exhibit normally distributed abundances (as represented by fold changes from the original dataset) across the 168 strains. Therefore we use Spearman's correlation, which is a nonparametric measure of rank correlation. Spearman's Rho is a measure of how correlated two variables are. The sign of Rho indicates the direction of association and the absolute value of Rho indicates how perfectly the two variables are monotonically related. 
+
+Codes in this section is found in "UnivariateAnalysis.R" line 35-98. 
+
+Results are stored in file "SpearmanCor.RData". Same results are also found in "SpearmanCor.xlsx". You can set thresholds for the P value/FDR, and/or Rho to get subsets of molecules. 
+
+
+### 1.2 Linear Model with Density Controlled
+
+Based on visualization ("RespProt_RespDensity.pdf","RespMet_RespDensity.pdf","RespLip_RespDensity.pdf","FermProt_FermDensity.pdf","FermMet_FermDensity.pdf","FermLip_FermDensity.pdf"), it is apparent that there is a relationship between density and molecule abundances. Therefore when we try to establish a relationship between lifespan and molecule abundances, it is important to control for the effect of density. Note that we are not particularly interested in the relationship between density and molecule abundance, we just need to account for the effect of density when we evaluate the relationship between lifespan and molecule abundance. Note that in this and the next section, in all models that has density as covariate, we have only 151 genotypes to work with, since 17 genotypes do not have density measurements. 
+
+Here for each molecule I construct a simple linear model $y_{i} = \beta_{0}+\beta_{1}\times LS_{i}+\beta_{2}\times Density_{i}+\varepsilon_{i}$, where y is the abundance of molecule, and it is predicted by a linear combination of lifespan and density. We are interested in whether $\beta_{1}$ is significantly different from 0. 
+
+I also performed analysis of variance in regression. The idea is that I partition the total variation in molecule abundance into components that are explained by lifespan, density, and randomness, and we are interested in whether lifespan can explain a significant proportion of variance in molecule abundance. 
+
+Code for this section is found in "UnivariateAnalysis.R" line 206-258. 
+
+Results are stored in file "LinearModel.RData". Pheno_Beta shows the estimated values of $\beta_{1}$, Pheno_Beta_P is the P value corresponding to the null hypothesis that $\beta_{1} =0$. Pheno_Beta_P.adj is the FDR adjusted Pheno_Beta_P. Pheno_ANOVA_P is the P value corresponding to the null hypothesis that lifespan does not explain significant amount of variation in molecule abundance. Pheno_ANOVA_P.adj is the FDR adjusted Pheno_ANOVA_P. Cov_Beta_P and Cov_ANOVA_P are p values for density (or $\beta_{2}$).
+
+Same results are also found in "LinearModel.xlsx". You can set thresholds for Pheno_Beta_P.adj, or Pheno_ANOVA_P.adj to get subsets of molecules. For the same FDR threshold you will get much fewer molecules using Pheno_Beta_P.adj. 
+
+
+
+### 1.3 Generalized Additive Model with Density Controlled
+
+Based on visualization ("RespProt_RespDensity.pdf","RespMet_RespDensity.pdf","RespLip_RespDensity.pdf","FermProt_FermDensity.pdf","FermMet_FermDensity.pdf","FermLip_FermDensity.pdf"), it is apparent that there is a relationship between density and molecule abundances, and that for a lot of molecules the relationship between density and molecule abundance is not linear, especially for the respiration data. Here I am using the generalized additive model to establish a relationship between lifespan and molecule abundances, while accounting for the nonlinear relationship between density and molecule abundance. 
+
+Here for each molecule I construct a simple linear model $y_{i} = \beta_{0}+\beta_{1}\times LS_{i}+\beta_{2}\times s(Density_{i})+\varepsilon_{i}$, where y is the abundance of molecule, and it is predicted by lifespan and smooth spline of density. We are interested in whether $\beta_{1}$ is significantly different from 0. 
+
+Code for this section is found in "UnivariateAnalysis.R" line 265-304. 
+
+Results are stored in file "GAM.RData". Pheno_Beta shows the estimated values of $\beta_{1}$, Pheno_Beta_P is the P value corresponding to the null hypothesis that $\beta_{1} =0$. Pheno_Beta_P.adj is the FDR adjusted Pheno_Beta_P. Cov_Beta_P is the p value for density (or $s(\beta_{2})$).
+
+Same results are also found in "GAM.xlsx". You can set thresholds for Pheno_Beta_P to get subsets of molecules. Note that this is method is very conservative in identifying molecules that are correlated with lifespan. 
+
+#### I would use results from the linear model. It is important to control for the effects of density, and GAM appeared to be too conservative. 
+
+
+## 2. Cluster Analysis 
+
+We noticed that some molecules share similar patterns in abundance. This could be due to similar functions or same regulatory mechanisms of the molecules. Here we use the fuzzy cMeans clustering method to reduce the omics data into clusters, and identify clusters of molecules whose abundances are associated with lifespan. We could perform enrichment analysis within interesting clusters in subsequent analysis. Fuzzy cMeans clustering was performed with the R package Mfuzz. Code for this section can be found in "Clustering.R". 
+
+We ended up dividing the RespProt data into 18 clusters, and the FermProt data into 19 clusters. It seems like clustering is only useful for the protein data, as for both metabolomics and lipidomics, correlation coefficients between different molecules are not overly high. 
+
+For proteomics data, I correlated the centers of clusters with lifespan with Spearman correlation. Rho and p values of correlation can be found in "Cluster.RData" and "Cluster.xlsx". Cluster membership of molecules can also be found in these two files. The variable MEM.SHIP is the membership score of molecules, which indicates how sure we are that a molecule belongs to a cluster, with 1 being the surest. It would be interesting to identify clusters that are highly correlated with lifespan, and perform enrichment analysis to see which pathways are enriched in these clusters. 
+
+
+## 3. Statistical Learning Models 
+
+The aim of this section is to build predictive models with which we could predict lifespan with proteomics, metabolomics or lipidomics, and to identify molecules that are critical in predicting phenotypes. The model I use is the random forest, which is a non-linear ensemble learning method, that ooperates by constructing a multitude of decision trees with subsets of predictors and outputting the mean prediction of the individual trees. It accomondates data with unscaled, correlated predictors, and can be used to rank the importance of predictors. Code for this section can be found in "RandomRorest.R". I used the "caret" package with "ranger" method, which is a wrapper of random forest. 
+
+Note that we have 168 strains for Resp omics and CLS, and 151 strains for Ferm omics and RLS. 
+
+I set aside 20% of all strains as the test sets, and used 80% of strains as the training set. I made sure that the test sets are not strains with the same family of genes deleted. I constructed random forest models with the training set, and determined the level of complexity of models using 5-fold cross validation.
+
+For RespProt and CLS, the model explains 29% of variation of CLS in the test set. For RespMet and CLS, the model explains 31% of variation of CLS in the test set. For RespLip and CLS, the model explains 15% of variation of CLS in the test set. 
+
+For FermProt and MeanRLS, the model explains 29% of variation of RLS in the test set. For FermMet and MeanRLS, the model explains 0.7% of variation of RLS in the test set, thus not a very useful model. For FermLip and MeanRLS, the model explains 17% of variation of RLS in the test set.  
+
+In each model, the variable importance was calculated. A larger value indicates an important predictor. Variable importance are stored in "RandomForest_VarImp.xlsx". 
+
+
+
+## Visualization 
+
+Codes for generating PCA plots can be found in "CombinePhenoOmics.R" before line 80. 
+
+PC loadings can be found in "PCA_Loadings.xlsx". 
